@@ -4,6 +4,7 @@ DOMAIN = "room_light_control"
 DOMAIN_SHORT = "rlc"
 
 #-> Input Variables
+CONF_TARGETS = "targets"
 CONF_ROOM = "room"
 CONF_ROOMS = "rooms"
 

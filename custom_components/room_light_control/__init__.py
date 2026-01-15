@@ -16,7 +16,6 @@ import logging
 import math
 import re
 from datetime import date, datetime, time, timedelta
-from threading import Timer
 import pprint
 from typing import Optional
 
@@ -61,6 +60,7 @@ from .const import (
     CONF_TURN_OFF_LIGHT,
     CONF_ROOM,
     CONF_ROOMS,
+    CONF_TARGETS,
     CONF_MOTION_SENSOR,
     CONF_MOTION_SENSORS,
     CONF_TURN_OFF_SENSOR,
@@ -84,12 +84,11 @@ MODE_SCHEMA = vol.Schema(
 )
 
 ENTITY_SCHEMA = vol.Schema(
-    cv.has_at_least_one_key(
-        CONF_ROOM
-    ),
+    cv.has_at_least_one_key(CONF_TARGETS, CONF_ROOM, CONF_ROOMS),
     {
-        vol.Required(CONF_ROOM, default=[]): cv.entity_ids,
-        vol.Required(CONF_ROOMS, default=[]): cv.entity_ids,
+        vol.Optional(CONF_TARGETS, default=[]): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_ROOM, default=[]): vol.All(cv.ensure_list, [cv.string]),
+        vol.Optional(CONF_ROOMS, default=[]): vol.All(cv.ensure_list, [cv.string]),
         vol.Optional(CONF_TURN_OFF_DELAY, default=DEFAULT_DELAY): cv.positive_int,
         vol.Optional(CONF_MOTION_SENSOR_RESETS_TIMER, default=False): cv.boolean,
         vol.Required(CONF_MOTION_SENSOR, default=[]): cv.entity_ids,
@@ -99,7 +98,9 @@ ENTITY_SCHEMA = vol.Schema(
         vol.Optional(CONF_TURN_OFF_BLOCKING_ENTITIES, default=[]): cv.entity_ids,
         vol.Optional(CONF_ILLUMINANCE_SENSOR, default=None): cv.entity_id,
         vol.Optional(CONF_ILLUMINANCE_SENSOR_THRESHOLD, default=DEFAULT_ILLUMINANCE_THRESHOLD): cv.small_float,
-        vol.Optional(ACTIVATE_LIGHT_SCRIPT_OR_SCENE, default=None): vol.All(cv.entity_ids, [vol.Match(r'^(scene|script)\..*')]),  # Restrict to scenes or scripts
+        vol.Optional(ACTIVATE_LIGHT_SCRIPT_OR_SCENE, default=None): vol.All(
+            cv.ensure_list, [vol.Match(r"^(scene|script)\..*")]
+        ),
         vol.Optional(CONF_TURN_OFF_LIGHT, default=None): cv.entity_ids,
     },
 )
@@ -370,6 +371,7 @@ class Model:
         self.turnOffScript = []
         self.activateLightSceneOrScript = []
         self.timer_handle = None
+        self.timer_expires_at = None
         self.name = None
         self.log = logging.getLogger(__name__ + "." + config.get(CONF_NAME))
         self.context = None
@@ -501,7 +503,7 @@ class Model:
 
             # We need to apply some tolerance to ignore oscillating values reported by the device
             delta_e = self.calc_delta_e(old_rgb_r, old_rgb_g, old_rgb_b, new_rgb_r, new_rgb_g, new_rgb_b)
-            self.log.debug("%s: Delta-E Color difference = %s", str(entity), str(delta_e))
+            self.log.debug("Delta-E Color difference = %s", str(delta_e))
 
             if delta_e > 1.0:
                 self.log.info("state_entity_state_change :: Significant rgb color change old = %s, new = %s", old_state.attributes["rgb_color"], new_state.attributes["rgb_color"])
@@ -514,6 +516,11 @@ class Model:
     @callback
     def state_entity_state_change(self, entity, old, new):
         """ State change callback for state entities. This can be called with either a state change or an attribute change. """
+        if new is None:
+            return
+
+        if self.context is None:
+            self.set_context(None)
         self.log.debug(
             "state_entity_state_change :: [ Entity: %s, Context: %s ]\n\tOld state: %s\n\tNew State: %s",
             str(entity),
@@ -578,15 +585,20 @@ class Model:
 
     def _start_timer(self):
         self.log.info("_start_timer :: Delay: " + str(self.turnOffDelay))
-        expiry_time = datetime.now() + timedelta(seconds=self.turnOffDelay)
+        expiry_time = dt.utcnow() + timedelta(seconds=self.turnOffDelay)
 
-        self.timer_handle = Timer(self.turnOffDelay, self.timer_expire)
-        self.timer_handle.start()
+        self._cancel_timer()
+        self.timer_expires_at = expiry_time
+        self.timer_handle = event.async_call_later(
+            self.hass, self.turnOffDelay, self._handle_timer_expire
+        )
         self.update(turn_off_delay=self.turnOffDelay, expires_at=expiry_time)
 
     def _cancel_timer(self):
-        if self.timer_handle.is_alive():
-            self.timer_handle.cancel()
+        if self.timer_handle is not None:
+            self.timer_handle()
+            self.timer_handle = None
+            self.timer_expires_at = None
 
     def _reset_timer(self):
         self.log.debug("_reset_timer :: Resetting timer")
@@ -599,6 +611,8 @@ class Model:
 
     def timer_expire(self):
         self.log.debug("timer_expire :: Timer expired")
+        self.timer_handle = None
+        self.timer_expires_at = None
         if self.is_motion_sensor_on():
             self.update(expires_at="waiting for motion sensor off event")
         else:
@@ -608,6 +622,10 @@ class Model:
                 self.log.debug("Turn_off_sensor timeout reached")
 
             self.timer_expires()            
+
+    @callback
+    def _handle_timer_expire(self, _now):
+        self.timer_expire()
 
     # =====================================================
     # S T A T E   M A C H I N E   C O N D I T I O N S
@@ -714,8 +732,26 @@ class Model:
             return True
 
         s = self.hass.states.get(self.illuminanceSensorEntity)
-        self.log.debug("Current light level: {}, Threshold: {} (lux)".format(s.state, self.illuminanceSensorThreshold))
-        isBelow = float(s.state) < float(self.illuminanceSensorThreshold)
+        if s is None:
+            self.log.warning("Illuminance Sensor %s not found", self.illuminanceSensorEntity)
+            return False
+
+        if s.state in (None, "unknown", "unavailable"):
+            self.log.debug("Illuminance Sensor state unavailable: %s", s.state)
+            return False
+
+        try:
+            illuminance = float(s.state)
+        except (TypeError, ValueError):
+            self.log.warning("Invalid illuminance value: %s", s.state)
+            return False
+
+        self.log.debug(
+            "Current light level: %s, Threshold: %s (lux)",
+            illuminance,
+            self.illuminanceSensorThreshold,
+        )
+        isBelow = illuminance < float(self.illuminanceSensorThreshold)
         self.log.info("Illuminance threshold reached: {}".format(isBelow))
 
         return isBelow
@@ -742,8 +778,9 @@ class Model:
         return False
 
     def is_timer_expired(self):
-        expired = self.timer_handle.is_alive() == False
-        return expired
+        if self.timer_expires_at is None:
+            return True
+        return dt.utcnow() >= self.timer_expires_at
 
     def does_sensor_reset_timer(self):
         return self.config[CONF_MOTION_SENSOR_RESETS_TIMER]
@@ -814,26 +851,39 @@ class Model:
     # =====================================================
         
     def setup_area_entities(self, config):
-        self.add(self.room, config, CONF_ROOM)
-        self.add(self.room, config, CONF_ROOMS)
+        targets = []
+        self.add(targets, config, CONF_TARGETS)
+        self.add(targets, config, CONF_ROOM)
+        self.add(targets, config, CONF_ROOMS)
 
-        self.log.debug("Setting up room: %s", self.room)
+        self.targets = targets
+        self.log.debug("Setting up targets: %s", self.targets)
 
-        if len(self.room) == 0:
-            self.log.error(
-                "No rooms defined. You must define at least one room."
-            )
+        if len(self.targets) == 0:
+            self.log.error("No targets defined. You must define at least one target.")
             return
 
         self.roomLightEntities = []    
 
-        for x in self.room:
-            area_id = self.get_area_id(x.lower())
+        for target in self.targets:
+            target_name = target.strip()
+            if target_name.startswith("light."):
+                self.roomLightEntities.append(target_name)
+                continue
+
+            area_id = self.get_area_id(target_name.lower())
             self.log.debug("area_id: %s", area_id)
-        
-            room_lights = self.get_entities_for_area(area_id, 'light')
+            if area_id is None:
+                self.log.warning("Target '%s' is not a light entity or area name.", target_name)
+                continue
+
+            room_lights = self.get_entities_for_area(area_id, "light")
             self.log.debug("room_lights: %s", room_lights)
             self.roomLightEntities.extend(room_lights)
+
+        if len(self.roomLightEntities) == 0:
+            self.log.error("No light entities found for targets: %s", self.targets)
+            return
 
         self.update(room_lights=self.roomLightEntities)
 
@@ -1009,13 +1059,10 @@ class Model:
         self.log.debug("call_service :: Setting ignore_state_changes_until to " + str(self.ignore_state_changes_until))
 
         domain, e = entity.split(".")
-        params = {}
-        if service_data is not None:
-            params = service_data
-
-        params["entity_id"] = entity        
+        params = service_data or {}
+        params["entity_id"] = entity
         self.hass.add_job(
-            self.hass.services.async_call(domain, service, service_data, context=self.context)
+            self.hass.services.async_call(domain, service, params, context=self.context)
         )
 
     def set_context(self, parent: Optional[Context] = None) -> None:
@@ -1038,6 +1085,8 @@ class Model:
         self.entity.async_set_context(self.context)
 
     def is_ignored_context(self, context: Context) -> bool:
+        if context is None:
+            return False
         if context.id.startswith(f"{DOMAIN_SHORT}_"):
             return True
         return False
@@ -1064,7 +1113,7 @@ class Model:
         self.log.debug("       C O N F I G U R A T I O N   D U M P        ")
         self.log.debug("--------------------------------------------------")
         self.log.debug("Room Light Control              %s", self.name)
-        self.log.debug("Room                            %s", str(self.room))        
+        self.log.debug("Targets                         %s", str(self.targets))
         self.log.debug("Room Lights:                    %s", str(self.roomLightEntities))        
         self.log.debug("Motion Sensors                  %s", str(self.motionSensorEntities))
         self.log.debug("Turn Off Sensors                %s", str(self.turnOffSensorEntities))

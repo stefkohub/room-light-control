@@ -22,7 +22,7 @@ To install Room Light Control, simply copy all files from the `room_light_contro
 
 ## Configuration
 
-Configuring Room Light Control is straightforward thanks to its auto-discovery feature that detects lights based on a room or area.
+Configuring Room Light Control is straightforward thanks to its auto-discovery feature that detects lights based on an area name or a list of light entities.
 
 To enable this integration, add the following lines to your `configuration.yaml` file:
 
@@ -33,16 +33,17 @@ room_light_control:
 
 ### Minimum sensor/entity requirements:
 
-- An area, which represents your room (e.g. office)
+- An area, which represents your room (e.g. office), or a list of light entities
 - One motion sensor
-- Lights assigned to the area
+- Lights assigned to the area (if you use areas)
 
 *Important:* This integration is built all around rooms, so first you need to configure an area for each of your rooms and assign the lights and sensors to the corresponding area.
 
 ### Configuration variables
 | Property name | Description | Default value |
 | --- | --- | --- |
-| `room` | The name of the room, corresponding to the area name. |  |
+| `targets` | Area names or `light.*` entity IDs. |  |
+| `room` | Legacy alias for area names. Use `targets` instead. |  |
 | `motion_sensor` | A list of motion sensors used to trigger the lights. When the state changes from off to on, the lights are turned on. |  |
 | `illuminance_sensor` | A sensor used to measure the illuminance in the room. (Optional) |  |
 | `illuminance_sensor_threshold` | The threshold illuminance value for the lights to turn on. (Optional) | `5.0` |
@@ -57,14 +58,14 @@ room_light_control:
 a) **Minimum Configuration** - The lights will turn on when motion is detected and will turn off after 3 minutes (default) of no motion.
 ```yaml
 - office_light_control:
-    room: office
+    targets: office
     motion_sensor: binary_sensor.office_motion_sensor
 ```
 
 b) **Using a Scene or Script to Turn On Lights** - You can either use a scene or a script to turn on the lights when motion is detected.
 ```yaml
 - floor_light_control:
-    room: floor
+    targets: floor
     motion_sensor: binary_sensor.floor_motion_sensor
     activate_light_script_or_scene: scene.floor_bright
     turn_off_delay: 30    
@@ -73,7 +74,7 @@ b) **Using a Scene or Script to Turn On Lights** - You can either use a scene or
 c) **Multiple Motion Sensors and Illuminance Sensor** - Use multiple motion sensors to trigger the light. An illuminance sensor can prevent the lights from turning on when there is enough natural light in the room.
 ```yaml
 - bedroom_light_control:
-    room: bedroom
+    targets: bedroom
     motion_sensor: 
       - binary_sensor.bedroom_left_motion_sensor
       - binary_sensor.bedroom_right_motion_sensor
@@ -86,7 +87,7 @@ c) **Multiple Motion Sensors and Illuminance Sensor** - Use multiple motion sens
 d) **Multiple Rooms Support** - This configuration enables automatic light control in a combined living area that includes a kitchen.
 ```yaml
 - living_light_control:
-    room: 
+    targets: 
       - livingroom
       - kitchen
     motion_sensor: 
@@ -101,7 +102,7 @@ d) **Multiple Rooms Support** - This configuration enables automatic light contr
 e) **Using a Human Presence Sensor (Aqara FP1)** - The lights will turn on when motion is detected and will turn off when a human presence sensor like the Aqara FP1 detects that the person has left the room. This is an alternative to using a timer to turn off the lights.
 ```yaml
 - bath_light_control:
-    room: bath
+    targets: bath
     motion_sensor: 
       - binary_sensor.bath_ground_motion_sensor # PIR motion sensor
       - binary_sensor.bath_occupancy # mmwave motion sensor
@@ -199,3 +200,11 @@ Room Light Control is licensed under the [GNU GENERAL PUBLIC LICENSE](LICENSE).
 ## Credits
 
 Special credits go to Daniel Mason, the creator of [entity-controller](https://github.com/danobot/entity-controller) from which I got inspired and used his code base as a starting point for this integration.
+f) **Direct Light Targets** - Use explicit light entities without an area.
+```yaml
+- desk_light_control:
+    targets:
+      - light.desk
+      - light.monitor_bias
+    motion_sensor: binary_sensor.desk_motion
+```
