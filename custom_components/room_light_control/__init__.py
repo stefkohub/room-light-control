@@ -30,7 +30,6 @@ from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import dt
 import homeassistant.util.uuid as uuid_util
 from transitions import Machine
-from transitions.extensions import HierarchicalMachine as Machine
 from homeassistant.helpers.service import async_call_from_config
 
 from colormath.color_objects import sRGBColor, LabColor
@@ -52,8 +51,6 @@ DEPENDENCIES = ["light", "sensor", "binary_sensor"]
 from .const import (
     DOMAIN,
     DOMAIN_SHORT,
-    STATES,
-
     DEFAULT_DELAY,
     DEFAULT_ILLUMINANCE_THRESHOLD,
     ACTIVATE_LIGHT_SCRIPT_OR_SCENE,
@@ -70,6 +67,12 @@ from .const import (
     CONF_TURN_OFF_BLOCKING_ENTITIES,
     CONF_TURN_OFF_DELAY,
     CONF_MOTION_SENSOR_RESETS_TIMER,
+    CONF_LUX_MIN,
+    CONF_LUX_MAX,
+    CONF_BRIGHTNESS_MIN,
+    CONF_BRIGHTNESS_MAX,
+    CONF_HOME_STATUS_ENTITY,
+    CONF_HOME_STATUS_BEHAVIORS,
 
     CONTEXT_ID_CHARACTER_LIMIT
 )
@@ -102,17 +105,37 @@ ENTITY_SCHEMA = vol.Schema(
             cv.ensure_list, [vol.Match(r"^(scene|script)\..*")]
         ),
         vol.Optional(CONF_TURN_OFF_LIGHT, default=None): cv.entity_ids,
+        vol.Optional(CONF_LUX_MIN, default=None): cv.small_float,
+        vol.Optional(CONF_LUX_MAX, default=None): cv.small_float,
+        vol.Optional(CONF_BRIGHTNESS_MIN, default=None): cv.positive_int,
+        vol.Optional(CONF_BRIGHTNESS_MAX, default=None): cv.positive_int,
+        vol.Optional(CONF_HOME_STATUS_ENTITY, default=None): vol.Match(r"^input_select\..*"),
+        vol.Optional(CONF_HOME_STATUS_BEHAVIORS, default={}): vol.Schema(
+            {
+                cv.string: vol.Schema(
+                    {
+                        vol.Optional(CONF_ILLUMINANCE_SENSOR_THRESHOLD): cv.small_float,
+                        vol.Optional(CONF_TURN_OFF_DELAY): cv.positive_int,
+                        vol.Optional(ACTIVATE_LIGHT_SCRIPT_OR_SCENE): vol.All(
+                            cv.ensure_list, [vol.Match(r"^(scene|script)\..*")]
+                        ),
+                        vol.Optional(CONF_LUX_MIN): cv.small_float,
+                        vol.Optional(CONF_LUX_MAX): cv.small_float,
+                        vol.Optional(CONF_BRIGHTNESS_MIN): cv.positive_int,
+                        vol.Optional(CONF_BRIGHTNESS_MAX): cv.positive_int,
+                    }
+                )
+            }
+        ),
     },
 )
 
 PLATFORM_SCHEMA = cv.schema_with_slug_keys(ENTITY_SCHEMA)
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:   
-    machine = setup_state_machine()
-
     async def activate_on_start(_):
         """Activate automation."""
-        await activate_automation(hass, config, machine)
+        await activate_automation(hass, config)
 
     if hass.is_running:
         await activate_on_start(None)
@@ -121,125 +144,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
     return True
 
-def setup_state_machine():
-    machine = Machine(
-        states=STATES,
-        initial="idle",
-        finalize_event="finalize"
-    )
-
-    # Idle
-    machine.add_transition(
-        trigger="sensor_on",
-        source="idle",
-        dest="active",
-        conditions=["is_state_entities_off", "is_illuminance_equal_or_below_threshold"],
-    )
-    machine.add_transition(
-        trigger="sensor_on",
-        source="idle",
-        dest="blocked",
-        conditions=["is_state_entities_on"],
-    )
-    machine.add_transition(
-        trigger="shouldClearBlock", 
-        source="idle", 
-        dest=None, 
-        conditions=["is_state_entities_off"]
-    )
-
-    # Blocked
-    machine.add_transition(
-        trigger="shouldClearBlock", 
-        source="blocked", 
-        dest="idle", 
-        conditions=["is_state_entities_off"],
-    )
-
-    machine.add_transition(
-        trigger="sensor_on", 
-        source="blocked", 
-        dest="blocked"
-    )  # re-entering self-transition (on_enter callback executed.)
-
-    # Active
-    machine.add_transition(
-        trigger="enter", 
-        source="active", 
-        dest="active_control", 
-    )
-
-    # Active Control
-    machine.add_transition(
-        trigger="sensor_on", 
-        source="active_control", 
-        dest=None, 
-        after="_reset_timer"
-    )
-    
-    machine.add_transition(
-        trigger="motion_sensor_off",
-        source="active_control",
-        dest="idle",
-        conditions=["is_timer_expired"],
-        unless=["is_turn_off_blocked"]
-    )
-
-    machine.add_transition(
-        trigger="motion_sensor_off",
-        source="active_control",
-        dest="blocked",
-        conditions=["is_turn_off_blocked"],
-    )
-    
-    # Active control
-    machine.add_transition(
-        trigger="shouldBlock",
-        source="active_control",
-        dest="idle",
-        conditions=["is_state_entities_off"],
-        unless=["is_turn_off_blocked"]
-    )
-
-    machine.add_transition(
-        trigger="shouldBlock", 
-        source="active_control",
-        dest='blocked', 
-        conditions=['is_state_entities_on']
-    )
-
-    machine.add_transition(
-        trigger="timer_expires",
-        source="active_control",
-        dest="idle",
-        conditions=["is_motion_sensor_off", "is_turn_off_sensor_off"],
-        unless=["is_turn_off_blocked"]
-    )
-
-    machine.add_transition(
-        trigger="timer_expires",
-        source="active_control",
-        dest="blocked",
-        conditions=["is_turn_off_blocked"],
-    )    
-
-    machine.add_transition(
-        trigger="turn_off_sensor_on",
-        source="active_control",
-        dest="idle",
-        unless=["is_turn_off_blocked"]
-    )
-
-    machine.add_transition(
-        trigger="turn_off_sensor_on",
-        source="active_control",
-        dest="blocked",
-        conditions=["is_turn_off_blocked"],
-    )
-    
-    return machine
-
-async def activate_automation(hass, config, machine):
+async def activate_automation(hass, config):
     """Activate the automation."""
 
     component = EntityComponent(_LOGGER, DOMAIN, hass)
@@ -252,7 +157,7 @@ async def activate_automation(hass, config, machine):
 
             config["name"] = key
             m = None
-            m = RoomLightController(hass, config, machine)
+            m = RoomLightController(hass, config)
             devices.append(m)
 
     await component.async_add_entities(devices)
@@ -261,7 +166,7 @@ async def activate_automation(hass, config, machine):
 
 class RoomLightController(entity.Entity):
 
-    def __init__(self, hass, config, machine):
+    def __init__(self, hass, config):
         self.attributes = {}
         self.may_update = False
         self.model = None
@@ -269,7 +174,7 @@ class RoomLightController(entity.Entity):
         if "friendly_name" in config:
             self.friendly_name = config.get("friendly_name")
         try:
-            self.model = Model(hass, config, machine, self)
+            self.model = Model(hass, config, self)
         except AttributeError as e:
             _LOGGER.error(
                 "Configuration error! Please ensure you use plural keys for lists. e.g. sensors, entities." + e
@@ -293,10 +198,6 @@ class RoomLightController(entity.Entity):
             return "mdi:circle-outline"
         if self.model.state == "active":
             return "mdi:check-circle"
-        if self.model.state == "active_control":
-            return "mdi:timer-outline"
-        if self.model.state == "blocked":
-            return "mdi:close-circle"
         return "mdi:eye"
 
     @property
@@ -352,7 +253,7 @@ class RoomLightController(entity.Entity):
 class Model:
     """ Represents the transitions state machine model """
 
-    def __init__(self, hass, config, machine, entity):
+    def __init__(self, hass, config, entity):
         self.hass = hass  
         self.entity = entity
 
@@ -367,9 +268,17 @@ class Model:
         self.turnOffBlockingEntities = []
         self.illuminanceSensorEntity = None
         self.illuminanceSensorThreshold = None
+        self.luxMin = None
+        self.luxMax = None
+        self.brightnessMin = None
+        self.brightnessMax = None
+        self.homeStatusEntity = None
+        self.homeStatusBehaviors = {}
         self.turnOffDelay = None
+        self.baseTurnOffDelay = None
         self.turnOffScript = []
         self.activateLightSceneOrScript = []
+        self.baseActivateLightSceneOrScript = []
         self.timer_handle = None
         self.timer_expires_at = None
         self.name = None
@@ -384,9 +293,7 @@ class Model:
         )
         self.name = config.get(CONF_NAME, "NoName")
 
-        machine.add_model(
-            self
-        )  # add here because machine generated methods are being used in methods below.
+        self.machine = self._create_machine()
         self.setup_area_entities(config)
         self.config_static_strings(config)
         self.config_sensor_entities(config)
@@ -430,7 +337,7 @@ class Model:
             self.log.debug("motion_sensor_state_change :: old NoneType")
             pass
 
-        if self.matches(new.state, self.SENSOR_ON_STATE) and (self.is_idle() or self.is_active_control() or self.is_blocked()):
+        if self.matches(new.state, self.SENSOR_ON_STATE) and (self.is_idle() or self.is_active()):
             self.log.debug("motion_sensor_state_change :: motion sensor turned on")
             self.set_context(new.context)
             self.update(last_triggered_by=entity)
@@ -438,7 +345,7 @@ class Model:
                 self.update(illuminance_sensor_on_last_motion=self.hass.states.get(self.illuminanceSensorEntity).state)
             self.sensor_on()
 
-        if self.matches(new.state, self.SENSOR_OFF_STATE) and self.is_active_control():
+        if self.matches(new.state, self.SENSOR_OFF_STATE) and self.is_active():
             self.log.debug("motion_sensor_state_change :: motion sensor turned off")
             self.set_context(new.context)
 
@@ -448,7 +355,7 @@ class Model:
                 self.update(notes="The sensor turned off and reset the timeout. Timer started.")
                 self._reset_timer()
             else: 
-                self.motion_sensor_off()              
+                self.motion_sensor_off()
 
     @callback
     def turn_off_sensor_state_change(self, entity, old, new):
@@ -460,8 +367,7 @@ class Model:
         if old is None:
             return
 
-        if self.matches(old.state, self.SENSOR_ON_STATE) and self.matches(new.state, self.SENSOR_OFF_STATE) and (
-            self.is_active_control() or self.is_blocked()):
+        if self.matches(old.state, self.SENSOR_ON_STATE) and self.matches(new.state, self.SENSOR_OFF_STATE) and self.is_active():
             self.log.debug("The turn off sensor turned to off, so let's try going back to idle.")
             self.turn_off_sensor_on()
 
@@ -575,15 +481,53 @@ class Model:
     def handle_state_change(self, new):
         self.set_context(new.context)    
 
-        if self.is_active_control():
-            self.log.info("handle_state_change :: We are in active control and the state of observed state entities changed.")
-            self.shouldBlock()
+        if self.is_active() and self.is_state_entities_off():
+            self.log.info("handle_state_change :: Lights turned off while active; returning to idle.")
+            self.turn_off_sensor_on()
 
-        if self.is_blocked():
-            self.log.info("handle_state_change :: We are in blocked state and the state of observed state entities changed.")
-            self.shouldClearBlock()
+    def _create_machine(self):
+        machine = Machine(
+            states=["idle", "active"],
+            initial="idle",
+            finalize_event="finalize",
+        )
+
+        machine.add_transition(
+            trigger="sensor_on",
+            source="idle",
+            dest="active",
+            conditions=["is_state_entities_off", "is_illuminance_equal_or_below_threshold"],
+        )
+        machine.add_transition(
+            trigger="sensor_on",
+            source="active",
+            dest=None,
+            after="_reset_timer",
+        )
+        machine.add_transition(
+            trigger="motion_sensor_off",
+            source="active",
+            dest=None,
+        )
+        machine.add_transition(
+            trigger="timer_expires",
+            source="active",
+            dest="idle",
+            conditions=["is_motion_sensor_off", "is_turn_off_sensor_off"],
+            unless=["is_turn_off_blocked"],
+        )
+        machine.add_transition(
+            trigger="turn_off_sensor_on",
+            source="active",
+            dest="idle",
+            unless=["is_turn_off_blocked"],
+        )
+
+        machine.add_model(self)
+        return machine
 
     def _start_timer(self):
+        self.turnOffDelay = self.get_turn_off_delay()
         self.log.info("_start_timer :: Delay: " + str(self.turnOffDelay))
         expiry_time = dt.utcnow() + timedelta(seconds=self.turnOffDelay)
 
@@ -631,7 +575,7 @@ class Model:
     # S T A T E   M A C H I N E   C O N D I T I O N S
     # =====================================================
     def is_within_grace_period(self):
-        """ This is important or else we will react to state changes caused by ourselve which results in going into blocked state."""
+        """Ignore state changes caused by this integration for a short grace window."""
         return datetime.now() < self.ignore_state_changes_until
 
     def _motion_sensor_entity_state(self):
@@ -746,12 +690,13 @@ class Model:
             self.log.warning("Invalid illuminance value: %s", s.state)
             return False
 
+        threshold = self.get_illuminance_threshold()
         self.log.debug(
             "Current light level: %s, Threshold: %s (lux)",
             illuminance,
-            self.illuminanceSensorThreshold,
+            threshold,
         )
-        isBelow = illuminance < float(self.illuminanceSensorThreshold)
+        isBelow = illuminance < float(threshold)
         self.log.info("Illuminance threshold reached: {}".format(isBelow))
 
         return isBelow
@@ -827,24 +772,11 @@ class Model:
         self.log.debug("Turning on Light Entities")
         self.turnOnLightEntities()
 
-        self.enter()
-
     def on_exit_active(self):
         self.log.debug("Exiting active")
         self.log.debug("on_exit_active :: cancelling timer")
 
         self._cancel_timer()  # cancel previous timer
-
-    def on_enter_blocked(self):
-        self.log.debug("Entering blocked")
-        self.update(blocked_at=datetime.now())
-        if self.is_turn_off_blocked():
-            self.update(blocked_by=self._turn_off_blocking_entity_state())
-        else:
-            self.update(blocked_by=self._state_entity_state())
-
-    def on_exit_blocked(self):
-        self.log.debug("Exiting blocked")
 
     # =====================================================
     #    C O N F I G U R A T I O N  &  V A L I D A T I O N
@@ -934,9 +866,10 @@ class Model:
             self.log.info("Turn Off Scripts: " +  pprint.pformat(self.turnOffScript))
 
     def config_turn_on_scene(self, config):
-        self.activateLightSceneOrScript = []
-        self.add(self.activateLightSceneOrScript, config, ACTIVATE_LIGHT_SCRIPT_OR_SCENE)
-        if len(self.activateLightSceneOrScript) > 0:
+        self.baseActivateLightSceneOrScript = []
+        self.add(self.baseActivateLightSceneOrScript, config, ACTIVATE_LIGHT_SCRIPT_OR_SCENE)
+        self.activateLightSceneOrScript = list(self.baseActivateLightSceneOrScript)
+        if len(self.baseActivateLightSceneOrScript) > 0:
             self.log.info("Turn On Scripts or Scenes: " +  pprint.pformat(self.activateLightSceneOrScript))
 
     def config_sensor_entities(self, config):
@@ -997,7 +930,8 @@ class Model:
             self.STATE_OFF_STATE.extend(off)
 
     def config_turn_off_delay(self, config):
-        self.turnOffDelay = config.get(CONF_TURN_OFF_DELAY, DEFAULT_DELAY)
+        self.baseTurnOffDelay = config.get(CONF_TURN_OFF_DELAY, DEFAULT_DELAY)
+        self.turnOffDelay = self.baseTurnOffDelay
 
     def config_other(self, config):
         self.ignore_state_changes_until = datetime.now()
@@ -1007,6 +941,18 @@ class Model:
         self.turnOffBlockingEntities = []
         self.add(self.turnOffBlockingEntities, config, CONF_TURN_OFF_BLOCKING_ENTITY)
         self.add(self.turnOffBlockingEntities, config, CONF_TURN_OFF_BLOCKING_ENTITIES)
+
+        self.luxMin = config.get(CONF_LUX_MIN)
+        self.luxMax = config.get(CONF_LUX_MAX)
+        self.brightnessMin = config.get(CONF_BRIGHTNESS_MIN)
+        self.brightnessMax = config.get(CONF_BRIGHTNESS_MAX)
+
+        self.homeStatusEntity = config.get(CONF_HOME_STATUS_ENTITY)
+        self.homeStatusBehaviors = config.get(CONF_HOME_STATUS_BEHAVIORS, {})
+        if self.homeStatusEntity:
+            event.async_track_state_change(
+                self.hass, self.homeStatusEntity, self.home_status_state_change
+            )
 
     # =====================================================
     #    H E L P E R   F U N C T I O N S        
@@ -1031,8 +977,12 @@ class Model:
                 self.call_service(e, "turn_on")
         else:
             self.log.info("turnOnLightEntities :: Turning On the Room Lights (default): %s", self.roomLightEntities)
+            brightness = self._brightness_from_lux()
             for e in self.roomLightEntities:
-                self.call_service(e, "turn_on")
+                if brightness is not None:
+                    self.call_service(e, "turn_on", brightness=brightness)
+                else:
+                    self.call_service(e, "turn_on")
 
 
     # =====================================================
@@ -1044,14 +994,15 @@ class Model:
             Called when entering active state and on initial set up to set
             correct service parameters.
         """
+        self.turnOffDelay = self.get_turn_off_delay()
         if self.is_turn_off_sensor_available():
             self.update(turn_off_delay="Controlled by turn off sensor (%d)" % self.turnOffDelay)
         else:
             self.update(turn_off_delay=self.turnOffDelay)
 
-
         self.update(illuminance_sensor=self.illuminanceSensorEntity)
-        self.update(illuminance_sensor_threshold=self.illuminanceSensorThreshold)
+        self.update(illuminance_sensor_threshold=self.get_illuminance_threshold())
+        self.update(active_home_status=self.get_home_status())
 
     def call_service(self, entity, service, **service_data):
         self.log.debug("call_service :: Calling service " + service + " on " + entity)
@@ -1091,6 +1042,73 @@ class Model:
             return True
         return False
 
+    def get_home_status(self):
+        if not self.homeStatusEntity:
+            return None
+        state = self.hass.states.get(self.homeStatusEntity)
+        return state.state if state else None
+
+    def get_active_behavior(self):
+        status = self.get_home_status()
+        if status is None:
+            return {}
+        return self.homeStatusBehaviors.get(status, {})
+
+    def get_turn_off_delay(self):
+        behavior = self.get_active_behavior()
+        return behavior.get(CONF_TURN_OFF_DELAY, self.baseTurnOffDelay)
+
+    def get_illuminance_threshold(self):
+        behavior = self.get_active_behavior()
+        return behavior.get(CONF_ILLUMINANCE_SENSOR_THRESHOLD, self.illuminanceSensorThreshold)
+
+    def _brightness_from_lux(self):
+        if not self.is_illuminance_sensor_available():
+            return None
+
+        behavior = self.get_active_behavior()
+        lux_min = behavior.get(CONF_LUX_MIN, self.luxMin)
+        lux_max = behavior.get(CONF_LUX_MAX, self.luxMax)
+        brightness_min = behavior.get(CONF_BRIGHTNESS_MIN, self.brightnessMin)
+        brightness_max = behavior.get(CONF_BRIGHTNESS_MAX, self.brightnessMax)
+
+        if None in (lux_min, lux_max, brightness_min, brightness_max):
+            return None
+
+        if lux_max <= lux_min:
+            self.log.warning("Invalid lux range: min=%s max=%s", lux_min, lux_max)
+            return None
+
+        state = self.hass.states.get(self.illuminanceSensorEntity)
+        if state is None or state.state in (None, "unknown", "unavailable"):
+            return None
+
+        try:
+            lux = float(state.state)
+        except (TypeError, ValueError):
+            return None
+
+        lux = max(lux_min, min(lux, lux_max))
+        ratio = 1.0 - ((lux - lux_min) / (lux_max - lux_min))
+        brightness = brightness_min + ratio * (brightness_max - brightness_min)
+        return max(1, min(255, int(round(brightness))))
+
+    @callback
+    def home_status_state_change(self, entity, old, new):
+        if new is None or (old is not None and new.state == old.state):
+            return
+
+        self.activateLightSceneOrScript = list(self.baseActivateLightSceneOrScript)
+        behavior = self.get_active_behavior()
+        override_scene = behavior.get(ACTIVATE_LIGHT_SCRIPT_OR_SCENE)
+        if override_scene:
+            self.activateLightSceneOrScript = override_scene
+
+        self.turnOffDelay = self.get_turn_off_delay()
+        self.prepare_service_data()
+        if self.is_active():
+            self._reset_timer()
+
     def matches(self, value, list):
         """
             Checks whether a string is contained in a list (used for matching state strings)
@@ -1123,4 +1141,8 @@ class Model:
         self.log.debug("Turn Off - Script:              %s", str(self.turnOffScript))
         self.log.debug("Turn Off - Blocking Entities    %s", str(self.turnOffBlockingEntities))        
         self.log.debug("Turn Off - Delay:               %s", str(self.turnOffDelay))
+        self.log.debug("Home Status Entity              %s", str(self.homeStatusEntity))
+        self.log.debug("Home Status Behaviors           %s", str(self.homeStatusBehaviors))
+        self.log.debug("Lux Range                        %s..%s", str(self.luxMin), str(self.luxMax))
+        self.log.debug("Brightness Range                 %s..%s", str(self.brightnessMin), str(self.brightnessMax))
         self.log.debug("--------------------------------------------------")

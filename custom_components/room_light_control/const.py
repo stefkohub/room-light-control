@@ -30,6 +30,14 @@ CONF_TURN_OFF_DELAY = "turn_off_delay"
 CONF_TURN_OFF_BLOCKING_ENTITY = "turn_off_blocking_entity"
 CONF_TURN_OFF_BLOCKING_ENTITIES = "turn_off_blocking_entities"
 
+CONF_LUX_MIN = "lux_min"
+CONF_LUX_MAX = "lux_max"
+CONF_BRIGHTNESS_MIN = "brightness_min"
+CONF_BRIGHTNESS_MAX = "brightness_max"
+
+CONF_HOME_STATUS_ENTITY = "home_status_entity"
+CONF_HOME_STATUS_BEHAVIORS = "home_status_behaviors"
+
 STATES = ['idle', 'blocked',
           {'name': 'active', 'children': ['control'],
            'initial': False}]

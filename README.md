@@ -52,6 +52,12 @@ room_light_control:
 | `turn_off_delay` | The time delay (in seconds) before turning off the lights after no motion is detected. Acts also as a timeout for the turn_off_sensor, if it is configured. (Optional) | `180` |
 | `turn_off_sensor` | A sensor used to detect when a person has left the room. When the state changes from on to off, the lights will be turned off. (Optional) |  |
 | `turn_off_blocking_entity` | An entity that, when active, prevents the lights from turning off. (Optional) |  |
+| `lux_min` | Minimum lux for linear brightness scaling. (Optional) |  |
+| `lux_max` | Maximum lux for linear brightness scaling. (Optional) |  |
+| `brightness_min` | Minimum brightness (1-255) for linear scaling. (Optional) |  |
+| `brightness_max` | Maximum brightness (1-255) for linear scaling. (Optional) |  |
+| `home_status_entity` | `input_select.*` entity that drives per-status behavior overrides. (Optional) |  |
+| `home_status_behaviors` | Per-status overrides for delay, thresholds, scenes, and scaling. Keys are case-sensitive. (Optional) |  |
 
 **Example Configurations:**
 
@@ -111,6 +117,32 @@ e) **Using a Human Presence Sensor (Aqara FP1)** - The lights will turn on when 
     activate_light_script_or_scene: script.bath_activate_light 
 ```
 
+f) **Linear Brightness Scaling + Home Status** - Scale brightness based on lux, and override behavior per home status.
+```yaml
+- office_light_control:
+    targets: office
+    motion_sensor: binary_sensor.office_motion
+    illuminance_sensor: sensor.office_lux
+    illuminance_sensor_threshold: 10
+    lux_min: 0
+    lux_max: 80
+    brightness_min: 80
+    brightness_max: 230
+    home_status_entity: input_select.home_mode
+    home_status_behaviors:
+      working:
+        illuminance_sensor_threshold: 20
+        lux_min: 0
+        lux_max: 120
+        brightness_min: 120
+        brightness_max: 255
+        turn_off_delay: 300
+        activate_light_script_or_scene: scene.office_work
+      sleep:
+        brightness_min: 10
+        brightness_max: 60
+        turn_off_delay: 30
+```
 ## Debugging
 
 If you encounter issues with Room Light Control, here are some steps and tools to help you troubleshoot and resolve them:
@@ -134,6 +166,10 @@ logger:
 ```
 
 ## Release History
+
+## Migration Notes
+
+- `home_status_behaviors` keys must match the `input_select` state exactly and are case-sensitive.
 
 <details>
   <summary>Version 1.0.5-beta</summary>
