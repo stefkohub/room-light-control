@@ -24,6 +24,7 @@ import voluptuous as vol
 from homeassistant.const import CONF_NAME, EVENT_HOMEASSISTANT_START
 from homeassistant.core import HomeAssistant, callback, Context
 from homeassistant.helpers import entity, event, service
+from homeassistant.helpers.event import async_track_state_change_event
 from homeassistant.helpers.template import Template
 from homeassistant.helpers.entity_component import EntityComponent
 from homeassistant.helpers.typing import ConfigType
@@ -485,6 +486,45 @@ class Model:
             self.log.info("handle_state_change :: Lights turned off while active; returning to idle.")
             self.turn_off_sensor_on()
 
+    @callback
+    def _handle_motion_sensor_event(self, event):
+        entity_id, old, new = self._extract_event_states(event)
+        if new is None:
+            return
+        self.motion_sensor_state_change(entity_id, old, new)
+
+    @callback
+    def _handle_turn_off_sensor_event(self, event):
+        entity_id, old, new = self._extract_event_states(event)
+        if new is None:
+            return
+        self.turn_off_sensor_state_change(entity_id, old, new)
+
+    @callback
+    def _handle_illuminance_sensor_event(self, event):
+        entity_id, old, new = self._extract_event_states(event)
+        if new is None:
+            return
+        self.illuminance_sensor_state_change(entity_id, old, new)
+
+    @callback
+    def _handle_state_entity_event(self, event):
+        entity_id, old, new = self._extract_event_states(event)
+        if new is None:
+            return
+        self.state_entity_state_change(entity_id, old, new)
+
+    @callback
+    def _handle_home_status_event(self, event):
+        entity_id, old, new = self._extract_event_states(event)
+        if new is None:
+            return
+        self.home_status_state_change(entity_id, old, new)
+
+    def _extract_event_states(self, event):
+        data = event.data
+        return data.get("entity_id"), data.get("old_state"), data.get("new_state")
+
     def _create_machine(self):
         machine = Machine(
             states=["idle", "active"],
@@ -819,8 +859,9 @@ class Model:
 
         self.update(room_lights=self.roomLightEntities)
 
-        event.async_track_state_change(
-        self.hass, self.roomLightEntities, self.state_entity_state_change)
+        async_track_state_change_event(
+            self.hass, self.roomLightEntities, self._handle_state_entity_event
+        )
 
     def get_area_name(self, area_id):
         area_reg = area_registry.async_get(self.hass)
@@ -884,16 +925,16 @@ class Model:
 
         self.log.debug("Motion Sensor Entities: " +  pprint.pformat(self.motionSensorEntities))
 
-        event.async_track_state_change(
-            self.hass, self.motionSensorEntities, self.motion_sensor_state_change
+        async_track_state_change_event(
+            self.hass, self.motionSensorEntities, self._handle_motion_sensor_event
         )
 
         self.turnOffSensorEntities = []
         self.add(self.turnOffSensorEntities, config, CONF_TURN_OFF_SENSOR)
         if self.is_turn_off_sensor_available() :
             self.log.info("Using turn off sensor entities to turn off light, instead of timer")
-            event.async_track_state_change(
-                self.hass, self.turnOffSensorEntities, self.turn_off_sensor_state_change
+            async_track_state_change_event(
+                self.hass, self.turnOffSensorEntities, self._handle_turn_off_sensor_event
             )
 
     def is_turn_off_sensor_available(self) -> bool:
@@ -907,8 +948,8 @@ class Model:
         self.log.debug("Illuminance Sensor Threshold: {}".format(self.illuminanceSensorThreshold))
         
         if self.illuminanceSensorEntity is not None :
-            event.async_track_state_change(
-                self.hass, self.illuminanceSensorEntity, self.illuminance_sensor_state_change
+            async_track_state_change_event(
+                self.hass, self.illuminanceSensorEntity, self._handle_illuminance_sensor_event
             )
 
     def config_static_strings(self, config):
@@ -950,8 +991,8 @@ class Model:
         self.homeStatusEntity = config.get(CONF_HOME_STATUS_ENTITY)
         self.homeStatusBehaviors = config.get(CONF_HOME_STATUS_BEHAVIORS, {})
         if self.homeStatusEntity:
-            event.async_track_state_change(
-                self.hass, self.homeStatusEntity, self.home_status_state_change
+            async_track_state_change_event(
+                self.hass, self.homeStatusEntity, self._handle_home_status_event
             )
 
     # =====================================================
