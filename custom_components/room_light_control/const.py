@@ -38,6 +38,15 @@ CONF_BRIGHTNESS_MAX = "brightness_max"
 CONF_HOME_STATUS_ENTITY = "home_status_entity"
 CONF_HOME_STATUS_BEHAVIORS = "home_status_behaviors"
 
+CONF_ADAPTIVE_DIMMING = "adaptive_dimming"
+CONF_ADAPTIVE_DIMMING_INTERVAL = "adaptive_dimming_interval"
+CONF_ADAPTIVE_DIMMING_MIN_DELTA = "adaptive_dimming_min_delta"
+CONF_ADAPTIVE_DIMMING_COOLDOWN = "adaptive_dimming_cooldown"
+CONF_ADAPTIVE_DIMMING_TARGET_LUX = "adaptive_dimming_target_lux"
+CONF_ADAPTIVE_DIMMING_GAIN = "adaptive_dimming_gain"
+CONF_ADAPTIVE_DIMMING_DEADBAND = "adaptive_dimming_deadband"
+CONF_ADAPTIVE_DIMMING_MAX_STEP = "adaptive_dimming_max_step"
+
 STATES = ['idle', 'blocked',
           {'name': 'active', 'children': ['control'],
            'initial': False}]

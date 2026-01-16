@@ -74,6 +74,14 @@ from .const import (
     CONF_BRIGHTNESS_MAX,
     CONF_HOME_STATUS_ENTITY,
     CONF_HOME_STATUS_BEHAVIORS,
+    CONF_ADAPTIVE_DIMMING,
+    CONF_ADAPTIVE_DIMMING_INTERVAL,
+    CONF_ADAPTIVE_DIMMING_MIN_DELTA,
+    CONF_ADAPTIVE_DIMMING_COOLDOWN,
+    CONF_ADAPTIVE_DIMMING_TARGET_LUX,
+    CONF_ADAPTIVE_DIMMING_GAIN,
+    CONF_ADAPTIVE_DIMMING_DEADBAND,
+    CONF_ADAPTIVE_DIMMING_MAX_STEP,
 
     CONTEXT_ID_CHARACTER_LIMIT
 )
@@ -128,6 +136,14 @@ ENTITY_SCHEMA = vol.Schema(
                 )
             }
         ),
+        vol.Optional(CONF_ADAPTIVE_DIMMING, default=False): cv.boolean,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_INTERVAL, default=60): cv.positive_int,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_MIN_DELTA, default=10): cv.positive_int,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_COOLDOWN, default=30): cv.positive_int,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_TARGET_LUX, default=None): cv.small_float,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_GAIN, default=0.5): cv.small_float,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_DEADBAND, default=2): cv.small_float,
+        vol.Optional(CONF_ADAPTIVE_DIMMING_MAX_STEP, default=25): cv.positive_int,
     },
 )
 
@@ -275,6 +291,17 @@ class Model:
         self.brightnessMax = None
         self.homeStatusEntity = None
         self.homeStatusBehaviors = {}
+        self.adaptiveDimming = False
+        self.adaptiveDimmingInterval = 60
+        self.adaptiveDimmingMinDelta = 10
+        self.adaptiveDimmingCooldown = 30
+        self.adaptiveDimmingTargetLux = None
+        self.adaptiveDimmingGain = 0.5
+        self.adaptiveDimmingDeadband = 2
+        self.adaptiveDimmingMaxStep = 25
+        self.last_dim_ts = None
+        self.last_dim_brightness = None
+        self.last_motion_off_ts = None
         self.turnOffDelay = None
         self.baseTurnOffDelay = None
         self.turnOffScript = []
@@ -349,6 +376,7 @@ class Model:
         if self.matches(new.state, self.SENSOR_OFF_STATE) and self.is_active():
             self.log.debug("motion_sensor_state_change :: motion sensor turned off")
             self.set_context(new.context)
+            self.last_motion_off_ts = dt.utcnow()
 
             # If configured, reset timer when sensor goes off
             if self.config[CONF_MOTION_SENSOR_RESETS_TIMER]:
@@ -378,6 +406,8 @@ class Model:
         """ State change callback for the illuminance sensor"""       
         self.log.debug("illuminance_sensor_state_change :: %10s Sensor state change to: %s" % ( pprint.pformat(entity), new.state))
         self.log.debug("illuminance_sensor_state_change :: state: " +  pprint.pformat(self.state))           
+        if self.adaptiveDimming:
+            self._maybe_adjust_brightness()
 
     def has_significant_color_change(self, old_state, new_state, rel_tol):
         color_mode = new_state.attributes.get('color_mode', None)
@@ -990,6 +1020,14 @@ class Model:
 
         self.homeStatusEntity = config.get(CONF_HOME_STATUS_ENTITY)
         self.homeStatusBehaviors = config.get(CONF_HOME_STATUS_BEHAVIORS, {})
+        self.adaptiveDimming = config.get(CONF_ADAPTIVE_DIMMING, False)
+        self.adaptiveDimmingInterval = config.get(CONF_ADAPTIVE_DIMMING_INTERVAL, 60)
+        self.adaptiveDimmingMinDelta = config.get(CONF_ADAPTIVE_DIMMING_MIN_DELTA, 10)
+        self.adaptiveDimmingCooldown = config.get(CONF_ADAPTIVE_DIMMING_COOLDOWN, 30)
+        self.adaptiveDimmingTargetLux = config.get(CONF_ADAPTIVE_DIMMING_TARGET_LUX)
+        self.adaptiveDimmingGain = config.get(CONF_ADAPTIVE_DIMMING_GAIN, 0.5)
+        self.adaptiveDimmingDeadband = config.get(CONF_ADAPTIVE_DIMMING_DEADBAND, 2)
+        self.adaptiveDimmingMaxStep = config.get(CONF_ADAPTIVE_DIMMING_MAX_STEP, 25)
         if self.homeStatusEntity:
             async_track_state_change_event(
                 self.hass, self.homeStatusEntity, self._handle_home_status_event
@@ -1132,7 +1170,105 @@ class Model:
         lux = max(lux_min, min(lux, lux_max))
         ratio = 1.0 - ((lux - lux_min) / (lux_max - lux_min))
         brightness = brightness_min + ratio * (brightness_max - brightness_min)
-        return max(1, min(255, int(round(brightness))))
+        return self._clamp_brightness(int(round(brightness)))
+
+    def _maybe_adjust_brightness(self):
+        if not self.is_active():
+            return
+        if self.activateLightSceneOrScript:
+            return
+
+        if not self.is_motion_sensor_on():
+            return
+        if self.last_motion_off_ts is not None:
+            since_off = (dt.utcnow() - self.last_motion_off_ts).total_seconds()
+            if since_off < self.adaptiveDimmingCooldown:
+                return
+
+        if not self._any_light_on():
+            return
+
+        now = dt.utcnow()
+        if self.last_dim_ts is not None:
+            elapsed = (now - self.last_dim_ts).total_seconds()
+            if elapsed < self.adaptiveDimmingInterval:
+                return
+
+        brightness = self._adaptive_brightness()
+        if brightness is None:
+            return
+
+        if self.last_dim_brightness is not None:
+            delta = abs(brightness - self.last_dim_brightness)
+            if delta < self.adaptiveDimmingMinDelta:
+                return
+
+        for entity_id in self.roomLightEntities:
+            self.call_service(entity_id, "turn_on", brightness=brightness)
+
+        self.last_dim_ts = now
+        self.last_dim_brightness = brightness
+
+    def _adaptive_brightness(self):
+        if self.adaptiveDimmingTargetLux is not None:
+            return self._p_controller_brightness()
+        return self._brightness_from_lux()
+
+    def _p_controller_brightness(self):
+        if not self.is_illuminance_sensor_available():
+            return None
+
+        state = self.hass.states.get(self.illuminanceSensorEntity)
+        if state is None or state.state in (None, "unknown", "unavailable"):
+            return None
+
+        try:
+            lux = float(state.state)
+        except (TypeError, ValueError):
+            return None
+
+        error = self.adaptiveDimmingTargetLux - lux
+        if abs(error) < self.adaptiveDimmingDeadband:
+            return None
+
+        current_brightness = self._current_brightness()
+        if current_brightness is None:
+            return None
+
+        step = self.adaptiveDimmingGain * error
+        step = max(-self.adaptiveDimmingMaxStep, min(self.adaptiveDimmingMaxStep, step))
+
+        new_brightness = int(round(current_brightness + step))
+        return self._clamp_brightness(new_brightness)
+
+    def _current_brightness(self):
+        values = []
+        for entity_id in self.roomLightEntities:
+            state = self.hass.states.get(entity_id)
+            if state is None:
+                continue
+            if not self.matches(state.state, self.STATE_ON_STATE):
+                continue
+            brightness = state.attributes.get("brightness")
+            if brightness is not None:
+                values.append(brightness)
+        if not values:
+            return None
+        return int(round(sum(values) / len(values)))
+
+    def _clamp_brightness(self, value: int) -> int:
+        min_brightness = self.brightnessMin if self.brightnessMin is not None else 1
+        max_brightness = self.brightnessMax if self.brightnessMax is not None else 255
+        return max(min_brightness, min(max_brightness, value))
+
+    def _any_light_on(self) -> bool:
+        for entity_id in self.roomLightEntities:
+            state = self.hass.states.get(entity_id)
+            if state is None:
+                continue
+            if self.matches(state.state, self.STATE_ON_STATE):
+                return True
+        return False
 
     @callback
     def home_status_state_change(self, entity, old, new):

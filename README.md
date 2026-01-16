@@ -58,6 +58,14 @@ room_light_control:
 | `brightness_max` | Maximum brightness (1-255) for linear scaling. (Optional) |  |
 | `home_status_entity` | `input_select.*` entity that drives per-status behavior overrides. (Optional) |  |
 | `home_status_behaviors` | Per-status overrides for delay, thresholds, scenes, and scaling. Keys are case-sensitive. (Optional) |  |
+| `adaptive_dimming` | Enable adaptive brightness updates while lights are on. (Optional) | `false` |
+| `adaptive_dimming_interval` | Minimum seconds between adaptive dimming updates. (Optional) | `60` |
+| `adaptive_dimming_min_delta` | Minimum brightness change (1-255) required to apply update. (Optional) | `10` |
+| `adaptive_dimming_cooldown` | Seconds to wait after motion turns off before dimming again. (Optional) | `30` |
+| `adaptive_dimming_target_lux` | Target lux for P-controller mode. If set, adaptive dimming uses P-control instead of linear mapping. (Optional) |  |
+| `adaptive_dimming_gain` | P-controller gain (lux error to brightness step). (Optional) | `0.5` |
+| `adaptive_dimming_deadband` | Lux error below this value is ignored. (Optional) | `2` |
+| `adaptive_dimming_max_step` | Maximum brightness change per update. (Optional) | `25` |
 
 **Example Configurations:**
 
@@ -128,6 +136,14 @@ f) **Linear Brightness Scaling + Home Status** - Scale brightness based on lux, 
     lux_max: 80
     brightness_min: 80
     brightness_max: 230
+    adaptive_dimming: true
+    adaptive_dimming_interval: 90
+    adaptive_dimming_min_delta: 15
+    adaptive_dimming_cooldown: 45
+    adaptive_dimming_target_lux: 15
+    adaptive_dimming_gain: 0.6
+    adaptive_dimming_deadband: 2
+    adaptive_dimming_max_step: 20
     home_status_entity: input_select.home_mode
     home_status_behaviors:
       working:
@@ -143,6 +159,16 @@ f) **Linear Brightness Scaling + Home Status** - Scale brightness based on lux, 
         brightness_max: 60
         turn_off_delay: 30
 ```
+
+### Adaptive Dimming Tuning Guide (P-Controller)
+
+- Start simple: `adaptive_dimming_target_lux` to your desired ambient lux, `adaptive_dimming_gain: 0.4`, `adaptive_dimming_deadband: 2`, `adaptive_dimming_max_step: 15`, `adaptive_dimming_interval: 60`.
+- If it reacts too slowly: increase `adaptive_dimming_gain` in steps of 0.1.
+- If it oscillates or flickers: decrease `adaptive_dimming_gain` or increase `adaptive_dimming_deadband`.
+- If changes are too aggressive: lower `adaptive_dimming_max_step`.
+- If it barely changes: raise `adaptive_dimming_max_step`.
+
+Safety clamps: `brightness_min` and `brightness_max` always apply, so brightness will not exceed those bounds even when adaptive dimming is enabled.
 ## Debugging
 
 If you encounter issues with Room Light Control, here are some steps and tools to help you troubleshoot and resolve them:
